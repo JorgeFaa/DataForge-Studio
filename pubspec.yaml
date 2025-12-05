@@ -1,0 +1,40 @@
+name: data_forge_studio
+description: "Application for DataForge API administrator of postgres databases."
+publish_to: 'none' 
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.1
+  cupertino_icons: ^1.0.8
+  data_table_2: ^2.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  windows:
+    generate: true
+    image_path: "assets/images/logoDATAFORGENT.png"
+    icon_size: 48
+  macos:
+    generate: true
+    image_path: "assets/images/logoDATAFORGENT.png"
+  linux:
+    generate: true
+    image_path: "assets/images/logoDATAFORGENT.png"
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/logoDATAFORGE.png
+    - assets/images/logoDATAFORGENT.png
