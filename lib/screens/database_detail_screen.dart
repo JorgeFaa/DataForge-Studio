@@ -3,13 +3,14 @@ import 'package:data_forge_studio/models/db_user_model.dart';
 import 'package:data_forge_studio/widgets/app_loading_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:data_table_2/data_table_2.dart';
 import '../api_config.dart';
 import '../app_theme.dart';
 import '../models/database_model.dart';
 import '../models/table_model.dart';
 import 'create_table_screen.dart';
 
-enum DetailView { tables, users }
+enum DetailView { tables, users, query }
 
 class DatabaseDetailScreen extends StatefulWidget {
   final Database database;
@@ -23,7 +24,7 @@ class DatabaseDetailScreen extends StatefulWidget {
 class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
   DetailView _currentView = DetailView.tables;
 
-  // --- Estado de Tablas ---
+  // --- Existing State for Tables, Users, CRUD... ---
   bool _isLoadingTables = true;
   List<String> _tables = [];
   String? _tablesError;
@@ -31,20 +32,23 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
   TableDetails? _selectedTableDetails;
   List<ForeignKey> _selectedTableForeignKeys = [];
   bool _isLoadingTableContent = false;
-
-  // --- Estado de Dynamic CRUD ---
   List<Map<String, dynamic>> _tableData = [];
   List<String> _tableDataHeaders = [];
   bool _isLoadingData = false;
   int _currentPage = 1;
   final int _limit = 20;
-
-  // --- Estado de Usuarios ---
   bool _isLoadingUsers = true;
   List<DbUser> _users = [];
   String? _usersError;
   final Map<String, List<UserPermission>> _userPermissionsCache = {};
   final Map<String, bool> _isLoadingPermissions = {};
+
+  // --- State for Query View ---
+  final _queryController = TextEditingController();
+  final _masterPasswordController = TextEditingController();
+  bool _isExecutingQuery = false;
+  Map<String, dynamic>? _queryResult;
+  String? _queryError;
 
   @override
   void initState() {
@@ -52,7 +56,7 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     _fetchTables();
   }
 
-  // --- Lógica de Tablas y Datos ---
+  // --- All existing data fetching and management logic remains here ---
   Future<void> _fetchTables() async {
     if (mounted) setState(() => _isLoadingTables = true);
     try {
@@ -90,16 +94,26 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
           final tableDetailsData = jsonDecode(responses[0].body);
           final foreignKeysData = jsonDecode(responses[1].body);
           final tableData = jsonDecode(responses[2].body) as List;
+          final details = TableDetails.fromJson(tableDetailsData);
+
+          List<String> headers;
+          if (tableData.isNotEmpty) {
+            headers = tableData.first.keys.toList();
+          } else {
+            headers = details.columns.map((c) => c.name).toList();
+          }
+
+          final pkColumn = details.columns.firstWhere((c) => c.isPrimaryKey, orElse: () => details.columns.first);
+          if (headers.contains(pkColumn.name)) {
+            headers.remove(pkColumn.name);
+            headers.insert(0, pkColumn.name);
+          }
 
           setState(() {
-            _selectedTableDetails = TableDetails.fromJson(tableDetailsData);
+            _selectedTableDetails = details;
             _selectedTableForeignKeys = (foreignKeysData as List).map((fk) => ForeignKey.fromJson(fk)).toList();
             _tableData = tableData.cast<Map<String, dynamic>>();
-            if (_tableData.isNotEmpty) {
-              _tableDataHeaders = _tableData.first.keys.toList();
-            } else if (_selectedTableDetails != null) {
-              _tableDataHeaders = _selectedTableDetails!.columns.map((c) => c.name).toList();
-            }
+            _tableDataHeaders = headers;
           });
         }
       } else {
@@ -114,27 +128,59 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
       });
     }
   }
-  
+
+  Future<void> _deleteTable(String tableName) async {
+    final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Confirmar Borrado'),
+          content: Text('¿Estás seguro de que quieres borrar la tabla \'$tableName\'? Esta acción no se puede deshacer.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
+            TextButton(onPressed: () => Navigator.of(context).pop(true), child: Text('Borrar', style: TextStyle(color: AppColors.error))),
+          ],
+        ));
+
+    if (confirmed != true) return;
+
+    try {
+      final response = await http.delete(Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/tables/$tableName'));
+      if (response.statusCode == 204) {
+        setState(() {
+          _tables.remove(tableName);
+          if (_selectedTableName == tableName) {
+            _selectedTableName = null;
+            _selectedTableDetails = null;
+          }
+        });
+      } else {
+        throw Exception('Error al borrar la tabla');
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
+    }
+  }
+
   Future<void> _deleteColumn(String columnName) async {
     final confirmed = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
-              title: const Text('Borrar Columna'),
-              content: Text('¿Seguro que quieres borrar la columna \'$columnName\'?'),
-              actions: [
-                TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
-                TextButton(onPressed: () => Navigator.of(context).pop(true), child: Text('Borrar', style: TextStyle(color: AppColors.error))),
-              ],
-            ));
+          title: const Text('Borrar Columna'),
+          content: Text('¿Seguro que quieres borrar la columna \'$columnName\'?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
+            TextButton(onPressed: () => Navigator.of(context).pop(true), child: Text('Borrar', style: TextStyle(color: AppColors.error))),
+          ],
+        ));
 
     if (confirmed != true) return;
 
     try {
       final response = await http.delete(Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/tables/$_selectedTableName/columns/$columnName'));
       if (response.statusCode == 204) {
-        _selectTable(_selectedTableName!); 
+        _selectTable(_selectedTableName!);
       } else {
-         throw Exception('Error al borrar la columna: ${response.body}');
+        throw Exception('Error al borrar la columna: ${response.body}');
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
@@ -157,7 +203,7 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     try {
       final response = await http.delete(Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/tables/$_selectedTableName/foreign-keys/$constraintName'));
       if (response.statusCode == 204) {
-        _selectTable(_selectedTableName!); 
+        _selectTable(_selectedTableName!);
       } else {
         throw Exception('Error al borrar la llave foránea: ${response.body}');
       }
@@ -166,9 +212,12 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     }
   }
 
-  Future<void> _showAddOrEditColumnDialog({ColumnDefinition? existingColumn}) async {
+  Future<void> _showAddOrEditColumnDialog({
+    ColumnDefinition? existingColumn,
+  }) async {
     final result = await showDialog<bool>(
       context: context,
+      barrierDismissible: false,
       builder: (context) => _AddOrEditColumnDialog(
         databaseId: widget.database.id,
         tableName: _selectedTableName!,
@@ -177,41 +226,10 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     );
 
     if (result == true) {
-      _selectTable(_selectedTableName!); // Recargar la tabla si hubo un cambio
+      _selectTable(_selectedTableName!);
     }
   }
 
-  Future<void> _deleteTable(String tableName) async {
-     final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-              title: const Text('Confirmar Borrado'),
-              content: Text('¿Estás seguro de que quieres borrar la tabla \'$tableName\'? Esta acción no se puede deshacer.'),
-              actions: [
-                TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
-                TextButton(onPressed: () => Navigator.of(context).pop(true), child: Text('Borrar', style: TextStyle(color: AppColors.error))),
-              ],
-            ));
-
-    if (confirmed != true) return;
-
-    try {
-      final response = await http.delete(Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/tables/$tableName'));
-      if (response.statusCode == 204) {
-        setState(() {
-          _tables.remove(tableName);
-          if (_selectedTableName == tableName) {
-            _selectedTableName = null;
-            _selectedTableDetails = null;
-          }
-        });
-      } else {
-        throw Exception('Error al borrar la tabla');
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
-    }
-  }
 
   void _navigateToCreateTable() async {
     final result = await Navigator.of(context).push(MaterialPageRoute(builder: (_) => CreateTableScreen(databaseId: widget.database.id)));
@@ -220,7 +238,6 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     }
   }
 
-  // --- Lógica de CRUD Dinámico ---
   Future<void> _showAddOrEditRecordDialog({Map<String, dynamic>? existingRecord}) async {
     final result = await showDialog<bool>(
       context: context,
@@ -242,18 +259,17 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     if(confirmed != true) return;
 
     try {
-        final response = await http.delete(Uri.parse('${ApiConfig.baseUrl}/db/${widget.database.id}/tables/$_selectedTableName/$recordId'));
-        if(response.statusCode == 204){
-            _selectTable(_selectedTableName!, page: _currentPage);
-        } else {
-            throw Exception('Error al borrar: ${response.body}');
-        }
+      final response = await http.delete(Uri.parse('${ApiConfig.baseUrl}/db/${widget.database.id}/tables/$_selectedTableName/$recordId'));
+      if(response.statusCode == 204){
+        _selectTable(_selectedTableName!, page: _currentPage);
+      } else {
+        throw Exception('Error al borrar: ${response.body}');
+      }
     } catch(e){
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
     }
   }
 
-  // --- Lógica de Usuarios ---
   Future<void> _fetchUsers() async {
     setState(() {
       _isLoadingUsers = true;
@@ -271,54 +287,6 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
       if (mounted) setState(() => _usersError = e.toString());
     } finally {
       if (mounted) setState(() => _isLoadingUsers = false);
-    }
-  }
-
-  Future<void> _fetchPermissionsForUser(String username) async {
-    setState(() => _isLoadingPermissions[username] = true);
-    try {
-      final response = await http.get(Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/db-users/$username/permissions'));
-      if (response.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(response.body);
-        if (mounted) {
-          setState(() {
-            _userPermissionsCache[username] = data.map((p) => UserPermission.fromJson(p)).toList();
-          });
-        }
-      } else {
-        throw Exception('Error al cargar permisos');
-      }
-    } catch (e) {
-       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
-    } finally {
-      if (mounted) setState(() => _isLoadingPermissions[username] = false);
-    }
-  }
-
-  Future<void> _revokePermission(String username, String tableName, String privilege) async {
-     try {
-      final response = await http.delete(
-        Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/db-users/$username/permissions'),
-        headers: {'Content-Type': 'application/json; charset=UTF-8'},
-        body: jsonEncode({'tableName': tableName, 'privileges': [privilege]}),
-      );
-      if (response.statusCode == 200) {
-        _fetchPermissionsForUser(username);
-      } else {
-        throw Exception('Error al revocar permiso: ${response.body}');
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
-    }
-  }
-
-  Future<void> _showGrantPermissionDialog(String username) async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => _GrantPermissionDialog(databaseId: widget.database.id, username: username, tables: _tables),
-    );
-    if (result == true) {
-      _fetchPermissionsForUser(username);
     }
   }
 
@@ -356,6 +324,89 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     if (result == true) _fetchUsers();
   }
 
+  Future<void> _fetchPermissionsForUser(String username) async {
+    setState(() => _isLoadingPermissions[username] = true);
+    try {
+      final response = await http.get(Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/db-users/$username/permissions'));
+      if (response.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(response.body);
+        if (mounted) {
+          setState(() {
+            _userPermissionsCache[username] = data.map((p) => UserPermission.fromJson(p)).toList();
+          });
+        }
+      } else {
+        throw Exception('Error al cargar permisos');
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
+    } finally {
+      if (mounted) setState(() => _isLoadingPermissions[username] = false);
+    }
+  }
+
+  Future<void> _revokePermission(String username, String tableName, String privilege) async {
+    try {
+      final response = await http.delete(
+        Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/db-users/$username/permissions'),
+        headers: {'Content-Type': 'application/json; charset=UTF-8'},
+        body: jsonEncode({'tableName': tableName, 'privileges': [privilege]}),
+      );
+      if (response.statusCode == 200) {
+        _fetchPermissionsForUser(username);
+      } else {
+        throw Exception('Error al revocar permiso: ${response.body}');
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: AppColors.error));
+    }
+  }
+
+  Future<void> _showGrantPermissionDialog(String username) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => _GrantPermissionDialog(databaseId: widget.database.id, username: username, tables: _tables),
+    );
+    if (result == true) {
+      _fetchPermissionsForUser(username);
+    }
+  }
+
+  Future<void> _executeQuery() async {
+    if (_queryController.text.isEmpty || _masterPasswordController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('La consulta SQL y la contraseña maestra son requeridas.')));
+      return;
+    }
+
+    setState(() {
+      _isExecutingQuery = true;
+      _queryResult = null;
+      _queryError = null;
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse('${ApiConfig.baseUrl}/databases/${widget.database.id}/query'),
+        headers: {'Content-Type': 'application/json; charset=UTF-8'},
+        body: jsonEncode({
+          'sql': _queryController.text,
+          'masterPassword': _masterPasswordController.text,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (mounted) setState(() => _queryResult = data);
+      } else {
+        throw Exception(response.body);
+      }
+    } catch (e) {
+      if (mounted) setState(() => _queryError = e.toString());
+    } finally {
+      if (mounted) setState(() => _isExecutingQuery = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -369,18 +420,27 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
               child: Text(widget.database.dbName, style: Theme.of(context).textTheme.headlineSmall),
             ),
             ExpansionTile(
-              leading: const Icon(Icons.table_rows_rounded), 
+              leading: const Icon(Icons.table_rows_rounded),
               title: const Text('Tablas'),
               initiallyExpanded: _currentView == DetailView.tables,
               children: [_buildTablesList()],
             ),
             ListTile(
-              leading: const Icon(Icons.people_alt_outlined), 
-              title: const Text('Usuarios'), 
+              leading: const Icon(Icons.people_alt_outlined),
+              title: const Text('Usuarios'),
               selected: _currentView == DetailView.users,
               onTap: () {
                 setState(() => _currentView = DetailView.users);
                 if (_users.isEmpty) _fetchUsers();
+                Navigator.of(context).pop();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.code),
+              title: const Text('Query'),
+              selected: _currentView == DetailView.query,
+              onTap: () {
+                setState(() => _currentView = DetailView.query);
                 Navigator.of(context).pop();
               },
             ),
@@ -407,6 +467,8 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     switch (_currentView) {
       case DetailView.users:
         return _buildUsersView();
+      case DetailView.query:
+        return _buildQueryView();
       case DetailView.tables:
       default:
         return _buildTablesView();
@@ -426,6 +488,11 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
           _selectTable(tableName);
           Navigator.of(context).pop();
         },
+        trailing: IconButton(
+          icon: const Icon(Icons.delete_outline, color: AppColors.error),
+          onPressed: () => _deleteTable(tableName),
+          tooltip: 'Borrar Tabla',
+        ),
       )).toList(),
     );
   }
@@ -444,50 +511,147 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
     return ListView(
       padding: const EdgeInsets.all(16.0),
       children: [
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('Columnas de $_selectedTableName', style: Theme.of(context).textTheme.headlineSmall), IconButton(icon: const Icon(Icons.add_circle, color: AppColors.primary), tooltip: 'Añadir Columna', onPressed: () => _showAddOrEditColumnDialog())]),
+        Row(
+          children: [
+            Expanded(child: Text('Columnas de $_selectedTableName', style: Theme.of(context).textTheme.headlineSmall, overflow: TextOverflow.ellipsis)),
+            IconButton(icon: const Icon(Icons.add_circle, color: AppColors.primary), tooltip: 'Añadir Columna', onPressed: () => _showAddOrEditColumnDialog()),
+          ],
+        ),
         ..._selectedTableDetails!.columns.map((col) => ListTile(leading: Icon(col.isPrimaryKey ? Icons.vpn_key : Icons.notes), title: Text('${col.name} (${col.dataType})'), trailing: Row(mainAxisSize: MainAxisSize.min, children: [IconButton(icon: const Icon(Icons.edit_outlined), onPressed: () => _showAddOrEditColumnDialog(existingColumn: col)), IconButton(icon: const Icon(Icons.delete_outline, color: AppColors.error), onPressed: () => _deleteColumn(col.name))]))),
         const Divider(height: 40),
         Text('Llaves Foráneas', style: Theme.of(context).textTheme.headlineSmall),
         if (_selectedTableForeignKeys.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 8.0), child: Text('No hay llaves foráneas.')),
         ..._selectedTableForeignKeys.map((fk) => ListTile(leading: const Icon(Icons.link), title: Text(fk.constraintName), subtitle: Text('${fk.localColumnName} -> ${fk.foreignTableName}(${fk.foreignColumnName})'), trailing: IconButton(icon: const Icon(Icons.delete_outline), color: AppColors.error, onPressed: () => _deleteForeignKey(fk.constraintName)))),
         const Divider(height: 40),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('Datos de la Tabla', style: Theme.of(context).textTheme.headlineSmall), IconButton(icon: const Icon(Icons.add_box_outlined, color: AppColors.primary), tooltip: 'Añadir Registro', onPressed: () => _showAddOrEditRecordDialog())]),
+        Row(
+          children: [
+            Expanded(child: Text('Datos de la Tabla', style: Theme.of(context).textTheme.headlineSmall, overflow: TextOverflow.ellipsis)),
+            IconButton(icon: const Icon(Icons.add_box_outlined, color: AppColors.primary), tooltip: 'Añadir Registro', onPressed: () => _showAddOrEditRecordDialog()),
+          ],
+        ),
         _buildDataView(),
       ],
     );
   }
 
+  Widget _buildQueryView() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          TextField(controller: _queryController, decoration: const InputDecoration(labelText: 'SQL Query', border: OutlineInputBorder()), maxLines: 5),
+          const SizedBox(height: 16),
+          TextField(controller: _masterPasswordController, obscureText: true, decoration: const InputDecoration(labelText: 'Master Password', border: OutlineInputBorder())),
+          const SizedBox(height: 16),
+          ElevatedButton.icon(
+            onPressed: _isExecutingQuery ? null : _executeQuery,
+            icon: const Icon(Icons.play_arrow_rounded),
+            label: const Text('Ejecutar'),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.onPrimary, padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16)),
+          ),
+          const Divider(height: 32),
+          Expanded(child: _buildQueryResultView()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQueryResultView() {
+    if (_isExecutingQuery) return const AppLoadingIndicator();
+    if (_queryError != null) return Center(child: Text(_queryError!, style: const TextStyle(color: AppColors.error)));
+    if (_queryResult == null) return const Center(child: Text('Los resultados de la consulta aparecerán aquí.'));
+    if (_queryResult!['success'] == false) return Center(child: Text(_queryResult!['message'], style: const TextStyle(color: AppColors.error)));
+    if (_queryResult!['isQueryResult'] == false) return Center(child: Text(_queryResult!['message'], style: const TextStyle(color: Colors.green)));
+
+    final columns = (_queryResult!['columns'] as List).cast<String>();
+    final rows = (_queryResult!['rows'] as List).cast<Map<String, dynamic>>();
+
+    if (rows.isEmpty) return const Center(child: Text('La consulta no devolvió resultados.'));
+
+    final double minWidthForTable = (columns.length * 150.0);
+
+    return SizedBox(
+      height: 400,
+      child: DataTable2(
+        columnSpacing: 12,
+        horizontalMargin: 12,
+        minWidth: minWidthForTable,
+        columns: columns.map((h) => DataColumn2(label: Text(h, style: const TextStyle(fontWeight: FontWeight.bold)), size: ColumnSize.L)).toList(),
+        rows: rows.map((row) {
+          return DataRow2(cells: columns.map((col) => DataCell(Text(row[col]?.toString() ?? 'NULL'))).toList());
+        }).toList(),
+      ),
+    );
+  }
+
   Widget _buildDataView() {
     if (_isLoadingData) return const AppLoadingIndicator();
-    if (_tableData.isEmpty) return const Center(child: Padding(padding: EdgeInsets.all(16), child: Text('Esta tabla no tiene registros.')));
 
-    final pkColumn = _selectedTableDetails?.columns.firstWhere((c) => c.isPrimaryKey, orElse: () => _selectedTableDetails!.columns.first);
+    // Widget que contendrá o la tabla o el mensaje de "no hay registros".
+    Widget dataContent;    if (_tableData.isEmpty) {
+      dataContent = const Center(
+        heightFactor: 10, // Para darle algo de altura y que no se vea aplastado
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('No hay más registros en esta página.'),
+        ),
+      );
+    } else {
+      final pkColumn = _selectedTableDetails?.columns.firstWhere((c) => c.isPrimaryKey, orElse: () => _selectedTableDetails!.columns.first);
+      final double minWidthForTable = (_tableDataHeaders.length * 150.0) + 120.0;
 
-    return Column(
-      children: [
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: DataTable(
-            columns: _tableDataHeaders.map((h) => DataColumn(label: Text(h, style: const TextStyle(fontWeight: FontWeight.bold)))).toList()..add(const DataColumn(label: Text('Acciones'))),
+        dataContent = SizedBox(
+          height: 500, // Aumentamos un poco la altura para que la tabla respire
+          child: DataTable2(
+            columnSpacing: 12,
+            horizontalMargin: 12,
+            minWidth: minWidthForTable, // Usar el ancho mínimo calculado
+            columns: _tableDataHeaders.map((h) => DataColumn2(
+              label: Text(h, style: const TextStyle(fontWeight: FontWeight.bold)),
+              size: ColumnSize.L, // Volver a tamaños relativos
+            )).toList()
+              ..add(const DataColumn2(
+                label: Text('Acciones'),
+                fixedWidth: 100, // Usar tamaño Mediano
+              )),
             rows: _tableData.map((row) {
-              return DataRow(
+              return DataRow2(
                 cells: _tableDataHeaders.map((header) {
                   return DataCell(Text(row[header]?.toString() ?? ''));
                 }).toList()
-                  ..add(DataCell(Row(mainAxisSize: MainAxisSize.min, children: [
-                    IconButton(icon: const Icon(Icons.edit), onPressed: pkColumn != null ? () => _showAddOrEditRecordDialog(existingRecord: row) : null),
-                    IconButton(icon: const Icon(Icons.delete), color: AppColors.error, onPressed: pkColumn != null ? () => _deleteRecord(row) : null),
-                  ]))),
+                  ..add(DataCell(Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        // Ya no necesitamos compactar los botones si la columna tiene espacio
+                        icon: const Icon(Icons.edit),
+                        onPressed: pkColumn != null ? () => _showAddOrEditRecordDialog(existingRecord: row) : null,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete),
+                        color: AppColors.error,
+                        onPressed: pkColumn != null ? () => _deleteRecord(row) : null,
+                      ),
+                    ],
+                  ))),
               );
             }).toList(),
           ),
-        ),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            IconButton(icon: const Icon(Icons.chevron_left), onPressed: _currentPage > 1 ? () => _selectTable(_selectedTableName!, page: _currentPage - 1) : null),
-            Text('Página $_currentPage'),
-            IconButton(icon: const Icon(Icons.chevron_right), onPressed: _tableData.length >= _limit ? () => _selectTable(_selectedTableName!, page: _currentPage + 1) : null),
+    );
+  }
+  return Column(
+    key: ValueKey('$_selectedTableName-$_currentPage'), // Clave más específica para reconstruir
+    children: [
+      // 1. Muestra la tabla o el mensaje de "no hay datos".
+      dataContent,
+
+      // 2. Muestra SIEMPRE la paginación.
+      Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          IconButton(icon: const Icon(Icons.chevron_left), onPressed: _currentPage > 1 ? () => _selectTable(_selectedTableName!, page: _currentPage - 1) : null),
+          Text('Página $_currentPage'),
+          IconButton(icon: const Icon(Icons.chevron_right), onPressed: _tableData.length >= _limit ? () => _selectTable(_selectedTableName!, page: _currentPage + 1) : null),
           ],
         )
       ],
@@ -504,7 +668,7 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
       itemBuilder: (context, index) {
         final user = _users[index];
         return ExpansionTile(
-          key: PageStorageKey(user.username), // Keep state on scroll
+          key: PageStorageKey(user.username),
           leading: Icon(user.canCreateRole ? Icons.admin_panel_settings : Icons.person, color: AppColors.secondary),
           title: Text(user.username, style: const TextStyle(fontWeight: FontWeight.bold)),
           subtitle: Text('Puede crear DB: ${user.canCreateDb}, Puede crear Roles: ${user.canCreateRole}'),
@@ -566,9 +730,9 @@ class _DatabaseDetailScreenState extends State<DatabaseDetailScreen> {
       ],
     );
   }
-
-
 }
+
+
 
 class _AddUserDialog extends StatefulWidget {
   final int databaseId;
@@ -649,6 +813,7 @@ class _AddUserDialogState extends State<_AddUserDialog> {
     );
   }
 }
+
 
 class _GrantPermissionDialog extends StatefulWidget {
   final int databaseId;
@@ -838,42 +1003,81 @@ class _AddOrEditColumnDialogState extends State<_AddOrEditColumnDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final maxWidth = MediaQuery.of(context).size.width * 0.9;
+
     return AlertDialog(
       title: Text(_isEditing ? 'Editar Columna' : 'Añadir Columna'),
-      content: Form(
-        key: _formKey,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: _nameController,
-                decoration: const InputDecoration(labelText: 'Nombre de la Columna'),
-                validator: (v) => v!.isEmpty ? 'Requerido' : null,
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                value: _selectedType,
-                items: _dropdownDataTypes.map((type) => DropdownMenuItem(value: type, child: Text(type))).toList(),
-                onChanged: (val) => setState(() => _selectedType = val!),
-                decoration: const InputDecoration(labelText: 'Tipo de Dato'),
-              ),
-              if (_typesWithLength.contains(_selectedType)) ...[
-                const SizedBox(height: 16),
+      content: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
                 TextFormField(
-                  controller: _lengthController,
-                  decoration: const InputDecoration(labelText: 'Largo/Precisión'),
-                  keyboardType: TextInputType.number,
+                  controller: _nameController,
+                  decoration: const InputDecoration(labelText: 'Nombre de la Columna'),
+                  validator: (v) => v!.isEmpty ? 'Requerido' : null,
+                ),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  initialValue: _selectedType,
+                  items: _dropdownDataTypes
+                      .map((type) => DropdownMenuItem(
+                          value: type,
+                          child: Text(type)
+                        ))
+                      .toList(),
+                  onChanged: (val) => setState(() => _selectedType = val!),
+                  decoration: const InputDecoration(labelText: 'Tipo de Dato'),
+                ),
+                if (_typesWithLength.contains(_selectedType)) ...[
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _lengthController,
+                    decoration: const InputDecoration(labelText: 'Largo/Precisión'),
+                    keyboardType: TextInputType.number,
+                  ),
+                ],const SizedBox(height: 16),
+
+              // Checkbox responsivos
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final isSmall = constraints.maxWidth < 250;
+                  if (isSmall) {
+                  // Si el ancho es MUY pequeño, apílalos en columna
+                    return Column(
+                      children: [
+                        _buildCheckbox('PK', _isPrimaryKey,
+                        _isEditing ? null : (v) => setState(() => _isPrimaryKey = v!)),
+                        _buildCheckbox('Nullable', _isNullable,
+                        (v) => setState(() => _isNullable = v!)),
+                        _buildCheckbox('Unique', _isUnique,
+                        (v) => setState(() => _isUnique = v!)),
+                      ],
+                    );
+                  }
+
+                  // Si el ancho es suficiente, usa Wrap
+                    return Wrap(
+                      alignment: WrapAlignment.spaceAround,
+                      spacing: 8,
+                      children: [
+                        _buildCheckbox('PK', _isPrimaryKey,
+                        _isEditing ? null : (v) => setState(() => _isPrimaryKey = v!)),
+                        _buildCheckbox('Nullable', _isNullable,
+                        (v) => setState(() => _isNullable = v!)),
+                        _buildCheckbox('Unique', _isUnique,
+                        (v) => setState(() => _isUnique = v!)),
+                      ],
+                    );
+                  },
                 ),
               ],
-              Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-                _buildCheckbox('PK', _isPrimaryKey, _isEditing ? null : (val) => setState(() => _isPrimaryKey = val!)),
-                _buildCheckbox('Nullable', _isNullable, (val) => setState(() => _isNullable = val!)),
-                _buildCheckbox('Unique', _isUnique, (val) => setState(() => _isUnique = val!)),
-              ]),
-            ],
+            ),
           ),
-        ),
+      ),
       ),
       actions: [
         TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
@@ -883,11 +1087,17 @@ class _AddOrEditColumnDialogState extends State<_AddOrEditColumnDialog> {
   }
 
   Widget _buildCheckbox(String label, bool value, ValueChanged<bool?>? onChanged) {
-    return Row(mainAxisSize: MainAxisSize.min, children: [Checkbox(value: value, onChanged: onChanged), Text(label)]);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Checkbox(value: value, onChanged: onChanged),
+        Text(label),
+      ],
+    );
   }
 }
 
-// DIÁLOGO PARA AÑADIR/EDITAR REGISTROS (CRUD)
+
 class _AddOrEditRecordDialog extends StatefulWidget {
   final TableDetails tableDetails;
   final int databaseId;
@@ -926,8 +1136,27 @@ class _AddOrEditRecordDialogState extends State<_AddOrEditRecordDialog> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isLoading = true);
 
-    final body = { for (var entry in _controllers.entries) entry.key: entry.value.text };
-    
+    final body = <String, dynamic>{};
+    final columnTypes = {for (var col in widget.tableDetails.columns) col.name: col.dataType};
+
+    for (var entry in _controllers.entries) {
+      final columnName = entry.key;
+      final value = entry.value.text;
+      final dataType = columnTypes[columnName] ?? '';
+
+      if (value.isEmpty) {
+        body[columnName] = null;
+      } else if (dataType.contains('int') || dataType.contains('serial')) {
+        body[columnName] = int.tryParse(value);
+      } else if (dataType.contains('numeric') || dataType.contains('decimal') || dataType.contains('real') || dataType.contains('double')) {
+        body[columnName] = num.tryParse(value);
+      } else if (dataType.contains('boolean')) {
+        body[columnName] = (value.toLowerCase() == 'true');
+      } else {
+        body[columnName] = value;
+      }
+    }
+
     try {
       http.Response response;
       String url;
